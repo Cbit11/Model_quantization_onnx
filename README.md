@@ -26,7 +26,7 @@ This repo rewrites the scan as ordinary PyTorch ops (a loop over the sequence), 
 - Selective SSM follows Algorithm 2 (S6) of the Mamba paper: input-dependent Δ, B, C; learned A and D; zero-order-hold discretization; sequential scan over the flattened window (`d_state = 16`).
 - Config: `dims=96, depths=[1,2], window_size=[8,4], num_heads=[6,6], mlp_ratio=0.6`. `[N]` parameters.
 - Trained on CIFAR-10 for `80` epochs (SGD, lr `1e-4`, batch 128, random-crop + flip). Test accuracy: **`[83.5]%`**.
-- `[State here which known issues the checkpoint was trained with, or that you retrained after fixing them. See "Limitations".]`
+
 
 ## Export
 
