@@ -2,8 +2,7 @@
 
 A small hybrid vision classifier for CIFAR-10 (convolutional stage, then windowed self-attention and a selective state-space (Mamba-style) block), with the selective scan **reimplemented in pure PyTorch** so the whole model can be exported to ONNX and run in ONNX Runtime (ORT). The project covers the full path: train, export, validate numerically, benchmark on CPU and GPU, and break the runtime down by stage.
 
-**Headline result:** ORT cut batch-1 GPU latency by **1.84x** (6.97 → 3.79 ms) and batch-1 CPU latency by **1.39x**, but was **16% slower than PyTorch at batch 128 on GPU**. The unfused scan accounts for 65–87% of runtime, so it limits what any runtime can gain.
-
+**Headline result:** ORT cut batch-1 GPU latency by **1.91x** (7.60 → 3.98 ms) and batch-1 CPU latency by **1.61x**, but its throughput was **16% lower than PyTorch at batch 128 on GPU**. The unfused scan accounts for 74–88% of runtime, so it limits what any runtime can gain. Test accuracy is **88.62%** on CIFAR-10.
 
 
 ---
@@ -25,9 +24,7 @@ This repo rewrites the scan as ordinary PyTorch ops (a loop over the sequence), 
 
 - Selective SSM follows Algorithm 2 (S6) of the Mamba paper: input-dependent Δ, B, C; learned A and D; zero-order-hold discretization; sequential scan over the flattened window (`d_state = 16`).
 - Config: `dims=96, depths=[1,2], window_size=[8,4], num_heads=[6,6], mlp_ratio=0.6`. `[N]` parameters.
-- Trained on CIFAR-10 for `80` epochs (SGD, lr `1e-4`, batch 128, random-crop + flip). Test accuracy: **`[83.5]%`**.
-
-
+- Trained on CIFAR-10 for `[N]` epochs (SGD, lr `[value]`, batch 128, random-crop + flip). Test accuracy: **88.62%** (validation loss 0.428). 
 ## Export
 
 ```bash
@@ -44,47 +41,50 @@ Opset 18, dynamic batch axis. Problems solved along the way:
 
 | Check | Result |
 |---|---|
-| Max \|logit difference\|, PyTorch vs ORT (CPU, batch 4) | **3.81e-06** |
-| Max \|logit difference\| (CUDA provider) | `[run validate.py]` |
-| CIFAR-10 test accuracy, PyTorch / ORT | `[XX.XX%]` / `[XX.XX%]` |
-| Prediction agreement on 10,000 test images | `[XX.XX%]` |
+| Max \|logit difference\|, PyTorch vs ORT (CPU provider, one random batch of 4) | **1.55e-06** |
+| Max \|logit difference\| (CUDA provider, 10,000 test images) | **6.38e-03** |
+| CIFAR-10 test accuracy, PyTorch / ORT (CUDA) | 88.62% / 88.64% |
+| Test loss, PyTorch / ORT (CUDA) | 0.4279 / 0.4279 |
+| Prediction agreement on 10,000 test images | **99.98%** (2 of 10,000 differ) |
+
+The logit difference on the GPU is larger than on the CPU (6.38e-03 vs 1.55e-06) because of GPU arithmetic such as TF32 convolutions, not the export: the CPU provider matches to about 1e-6 on the same checkpoint. The two rows differ in scope (random batch vs all 10,000 test images). 
 
 ## Benchmarks
 
-Setup: `[CPU model, cores/threads used]`, `[GPU, e.g. RTX 3050 Laptop/Desktop, VRAM]`, WSL2 Ubuntu, PyTorch `[ver]`, ONNX Runtime `[ver]` (`onnxruntime-gpu`), fp32. Median latency over 200 runs (batch 1) or 30 runs (batch 128) after 20 warm-up runs. CPU thread counts matched between PyTorch and ORT. GPU timings exclude host–device copies (ORT uses IO binding) and synchronize around each call. Reproduce with `python benchmark.py --ckpt model_XXXX --onnx mamba_vision_cifar10.onnx`.
+Setup: AMD Ryzen 7 4800H (8 cores / 16 threads; benchmark used 16 threads ), NVIDIA GeForce RTX 3050 Laptop GPU (4 GB, driver 617.14), WSL2 Ubuntu, Python 3.12, PyTorch 2.10.0+cu128 (CUDA 12.8, cuDNN 9.10), ONNX Runtime 1.30.0 (`onnxruntime-gpu`), ONNX 1.23.1, fp32. Median latency over 200 runs (batch 1) or 30 runs (batch 128) after 20 warm-up runs. CPU thread counts matched between PyTorch and ORT. GPU timings exclude host–device copies (ORT uses IO binding) and synchronize around each call. Reproduce with `python benchmark.py --ckpt model_XXXX --onnx mamba_vision_cifar10.onnx`.
 
 ### End-to-end
 
 | Device | Batch | PyTorch (ms) | ORT (ms) | ORT speedup | PyTorch img/s | ORT img/s |
 |---|---|---|---|---|---|---|
-| CPU | 1 | 4.70 | 3.39 | **1.39x** | 213 | 295 |
-| CPU | 128 | 239.0 | 170.4 | **1.40x** | 536 | 751 |
-| GPU | 1 | 6.97 | 3.79 | **1.84x** | 144 | 264 |
-| GPU | 128 | 12.42 | 14.74 | **0.84x** | 10,303 | 8,685 |
+| CPU | 1 | 4.50 | 2.79 | **1.61x** | 222 | 358 |
+| CPU | 128 | 205.6 | 191.3 | **1.07x** | 623 | 669 |
+| GPU | 1 | 7.60 | 3.98 | **1.91x** | 132 | 251 |
+| GPU | 128 | 13.11 | 15.56 | **0.84x** | 9,763 | 8,226 |
 
 ### Where the time goes (ORT speedup per stage)
 
 | Stage | CPU bs 1 | CPU bs 128 | GPU bs 1 | GPU bs 128 |
 |---|---|---|---|---|
-| Patch embed | 2.74x | 2.98x | 2.13x | 1.16x |
-| Level 0 (conv) | 1.86x | 0.97x | 1.66x | 0.84x |
-| Level 1 (attention + Mamba) | 1.50x | 1.18x | 2.00x | 0.85x |
+| Patch embed | 3.67x | 4.03x | 1.62x | 1.00x |
+| Level 0 (conv) | 2.11x | 1.38x | 1.48x | 0.85x |
+| Level 1 (attention + Mamba) | 1.59x | 1.26x | 2.04x | 0.86x |
 
-The attention + Mamba stage is 77% of PyTorch CPU time and 87% of PyTorch GPU time at batch 128, and 80% of ORT GPU time at batch 1. At batch 128 it peaks at 140 MB of GPU memory, against 16–34 MB for every other stage, because the discretized `(B, L, D, N)` tensors are materialized.
+The attention + Mamba stage is 87% of PyTorch CPU time and 83% of PyTorch GPU time at batch 128, and 82% of ORT GPU time at batch 1. At batch 128 it peaks at 140 MB of GPU memory, against 16–34 MB for every other stage, because the discretized `(B, L, D, N)` tensors are materialized.
 
 ### What the results show
 
-- **Small batches are launch-bound.** Batch 1 on GPU is slower than batch 1 on CPU for PyTorch (6.97 vs 4.70 ms), and batch 128 costs only 1.8x more than batch 1 for 128x the work. The scan loop launches many tiny kernels, and ORT's graph optimization removes some of that overhead, hence 1.84x.
-- **Large batches are throughput-bound, and PyTorch wins on GPU.** When the GPU is saturated, PyTorch's kernels beat ORT's on this model by about 16%. The result is stable (ORT std 0.12 ms), not noise.
+- **Small batches are launch-bound.** Batch 1 on GPU is slower than batch 1 on CPU for PyTorch (7.60 vs 4.50 ms), and batch 128 costs only 1.7x more than batch 1 for 128x the work. The scan loop launches many tiny kernels, and ORT's graph optimization removes some of that overhead, hence 1.91x.
+- **Large batches are throughput-bound, and PyTorch wins on GPU.** When the GPU is saturated, PyTorch's kernels beat ORT's on this model (9,763 vs 8,226 img/s, 16% lower for ORT). The result is stable (ORT std 0.22 ms) and repeated across runs, so it is not noise.
 - **The scan dominates.** Conv stages speed up well in ORT but are a small share of runtime, so end-to-end gains are limited by the unfused scan.
-- **CPU batch-1 PyTorch timings are noisy** (p95 20 ms vs 4.7 ms median) while ORT is steady (p95 5.0 ms). Treat CPU numbers as ±`[X]%` across repeated runs.
+- **CPU timings are noisy.** PyTorch batch-1 has p95 27.0 ms vs a 4.5 ms median, while ORT is steadier (p95 6.6 ms). The CPU batch-128 speedup varied between roughly 1.0x and 1.4x across runs, so treat it as a range.
+- **Tail latency on GPU at batch 1:** ORT's median is half of PyTorch's, but its p95 is higher (14.5 vs 11.5 ms), so quote p95 alongside the median.
 
 ## Limitations
 
-- The scan is the unfused reference form, so absolute GPU throughput is below what the official fused kernel would reach. I did not benchmark against `mamba-ssm` `[or: see results in ...]`.
-- `[Known model issues: list any of these that apply to the checkpoint, e.g. the A-matrix sign/ordering in discretization, missing MLP residual connections. Say whether you fixed them and retrained.]`
+- The scan is the unfused reference form, so absolute GPU throughput is below what the official fused kernel would reach. I did not benchmark against `mamba-ssm` 
 - The model is small and CIFAR-10-scale; sequence length per scan is 16, so the scan's long-sequence advantages are not exercised.
-- fp32 only so far. `[INT8 quantization results go here if completed.]`
+- fp32 only so far. 
 
 ## Future work
 
